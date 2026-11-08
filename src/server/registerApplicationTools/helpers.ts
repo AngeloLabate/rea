@@ -63,11 +63,49 @@ export const deliverApplicationEvidence = async (
             id === parent.evidence_id ? parent : options.evidenceById?.(id),
         );
   await setImmediate();
-  if (signal.aborted)
-    return delivery.toErrorToolResult(
-      new AnalysisCancelledError(contract.name, { cause: signal.reason }),
-      contract.returnsTargetContent,
+  if (signal.aborted) {
+    // A completed parent is retained; a cancelled selection is not, so those
+    // callers keep the unchanged-session contract.
+    const interrupted = new AnalysisCancelledError(contract.name, {
+      cause: signal.reason,
+    });
+    if (view !== undefined)
+      return delivery.toPartialErrorToolResult(
+        interrupted,
+        contract.returnsTargetContent,
+        options.recordEvidence,
+      );
+    // The parent is committed, so the source records it links to have to be
+    // committed first; otherwise the retained result names Evidence the session
+    // never saved and later closure or export resolution fails as missing.
+    const sources = recordEvidenceSources(
+      options.recordEvidence,
+      execution.sources,
     );
+    if (!sources.ok) {
+      // The parent is still committed evidence; a source the session refuses
+      // must not hide it from the caller. Keep the cancellation primary, keep
+      // the completed observation inline, and carry the save failure as a
+      // secondary cause.
+      interrupted.retainPartialObservation(parent);
+      interrupted.retainSecondaryFailure(sources.error);
+      return delivery.toPartialErrorToolResult(
+        interrupted,
+        contract.returnsTargetContent,
+        options.recordEvidence,
+      );
+    }
+    const retained = delivery.toPartialErrorToolResult(
+      interrupted.retainPartialObservation(parent),
+      contract.returnsTargetContent,
+      options.recordEvidence,
+    );
+    // The retained parent carries an open unknown on ordinary completion, so a
+    // cancelled run registers the same unknown rather than dropping it.
+    if (unknownKind !== undefined)
+      recordApplicationResult(options, parent, unknownKind);
+    return retained;
+  }
   if (!selected.ok) return delivery.toCallToolResult(selected, contract);
   const sources = recordEvidenceSources(
     options.recordEvidence,
