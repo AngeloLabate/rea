@@ -3,9 +3,15 @@ const concat = (...parts: Buffer[]): Buffer => Buffer.concat(parts);
 const encodeLength = (length: number): Buffer => {
   if (length < 0x80) return Buffer.from([length]);
   if (length <= 0xff) return Buffer.from([0x81, length]);
-  const bytes = Buffer.alloc(3);
-  bytes[0] = 0x82;
-  bytes.writeUInt16BE(length, 1);
+  if (length <= 0xffff) {
+    const bytes = Buffer.alloc(3);
+    bytes[0] = 0x82;
+    bytes.writeUInt16BE(length, 1);
+    return bytes;
+  }
+  const bytes = Buffer.alloc(4);
+  bytes[0] = 0x83;
+  bytes.writeUIntBE(length, 1, 3);
   return bytes;
 };
 
@@ -68,27 +74,29 @@ export const pkcs7SignedDataFixture = (
   organization = "REA Tests",
   signature = octet(Buffer.from("sig")),
   unsignedAttributes?: readonly (readonly number[])[],
+  extraCertificateName?: string,
 ): Buffer => {
   const serial = Buffer.from([0x11, 0x22, 0x33, 0x44]);
   const subject = name(commonName, organization);
-  const tbs = seq(
-    context(0, integer(2)),
-    integer(serial),
-    algorithm(SHA256_RSA),
-    subject,
-    seq(utc("250101000000Z"), utc("260101000000Z")),
-    subject,
-    seq(algorithm(RSA), bitString(Buffer.from("pubkey"))),
-    context(
-      3,
-      seq(seq(oid([2, 5, 29, 14]), octet(Buffer.from([0x04, 0x01, 0xaa])))),
-    ),
-  );
-  const certificate = seq(
-    tbs,
-    algorithm(SHA256_RSA),
-    bitString(Buffer.from("signature")),
-  );
+  const certificateOf = (owner: Buffer) =>
+    seq(
+      seq(
+        context(0, integer(2)),
+        integer(serial),
+        algorithm(SHA256_RSA),
+        owner,
+        seq(utc("250101000000Z"), utc("260101000000Z")),
+        owner,
+        seq(algorithm(RSA), bitString(Buffer.from("pubkey"))),
+        context(
+          3,
+          seq(seq(oid([2, 5, 29, 14]), octet(Buffer.from([0x04, 0x01, 0xaa])))),
+        ),
+      ),
+      algorithm(SHA256_RSA),
+      bitString(Buffer.from("signature")),
+    );
+  const certificate = certificateOf(subject);
   const signer = seq(
     integer(1),
     seq(subject, integer(serial)),
@@ -112,7 +120,15 @@ export const pkcs7SignedDataFixture = (
     integer(1),
     set(algorithm(SHA256)),
     seq(DATA),
-    context(0, certificate),
+    context(
+      0,
+      extraCertificateName === undefined
+        ? certificate
+        : concat(
+            certificateOf(name(extraCertificateName, organization)),
+            certificate,
+          ),
+    ),
     set(signer),
   );
   return seq(SIGNED_DATA, context(0, signedData));
